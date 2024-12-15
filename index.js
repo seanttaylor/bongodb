@@ -118,32 +118,49 @@ app.delete('/databases/:databaseName', async (req, res) => {
 });
 
 //QueryService
-app.put('/databases/:databaseName/collections/:collectionName', async (req, res) => {
-    const { databaseName, collectionName } = req.params;
+app.put('/databases/:databaseName/collections/:collectionName/:mongoId', async (req, res) => {
+    const { databaseName, collectionName, mongoId } = req.params;
     const { client, connectionName } = CONNECTED_CLIENTS[databaseName];
 
+    // A stopgap prior to moving this logic to a middleware function. The 
+    // ObjectId constructor throws an exception rather than 
+    // returning an error below
     try {
-        const resourceId = req.body._id ? new ObjectId(req.body._id) : undefined;
-        const ifMatch = req.headers['if-match'];
+        if (!ObjectId.isValid(new ObjectId(mongoId))) {
+           // do nothing proceed to the next try/catch block
+        }
+    } catch(ex) {
+        console.error(`INTERNAL_ERROR (QueryService): Exception encountered while inserting into collection (${databaseName}/${collectionName}) See details -> ${ex.message}`);
 
+        res.status(400).json({ 
+            name: connectionName,
+            message: `BAD_REQUEST: Missing or invalid id param. id *MUST* be a valid MongoDB ObjectId. See https://stackoverflow.com/questions/10593337/is-there-any-way-to-create-mongodb-like-id-strings-without-mongodb for example ObjectId`,
+            timestamp: new Date().toISOString() 
+        });
+        return;
+    }
+
+    try {
         if (!client) {
             res.status(404).json({ 
-                name: connectionName, 
+                name: null,
                 message: `No existing connection found for database: (${databaseName})`,
                 timestamp: new Date().toISOString() 
             });
             return;
         }
 
-        const query = { _id: resourceId };
+        const documentId = mongoId ? new ObjectId(mongoId) : undefined;
+        const ifMatch = req.headers['if-match'];
+        const query = { _id: documentId };
         // we have to remove non-computed properties to ensure the generated ETag can match
         // objects sent by the client
-        const existingResource = await client.db(databaseName).collection(collectionName).findOne(query);
+        const existingDoc = await client.db(databaseName).collection(collectionName).findOne(query);
 
-        if (existingResource) {
-            const { _lastModified, _createdAt } = existingResource;
-            const nonComputedResource = removeComputedProperties(existingResource);
-            const currentETag = crypto.createHash('sha256').update(JSON.stringify(nonComputedResource)).digest('base64');
+        if (existingDoc) {
+            const { _lastModified, _createdAt } = existingDoc;
+            const nonComputedPropsExistingDoc = removeComputedProperties(existingDoc);
+            const currentETag = crypto.createHash('sha256').update(JSON.stringify(nonComputedPropsExistingDoc)).digest('base64');
             
             if (!ifMatch) {
                 // Request intent unclear, return 409 Conflict with ETag and Last-Modified headers
@@ -168,20 +185,20 @@ app.put('/databases/:databaseName/collections/:collectionName', async (req, res)
             }
 
             // Exclude computed properties from request body before merging
-            const nonComputedBody = removeComputedProperties(req.body);
+            const nonComputedPropsRequestBody = removeComputedProperties(req.body);
  
-            // Update the specified resource
+            // Update the specified document
              const updatedDocument = {
-                ...nonComputedResource,
-                ...nonComputedBody,
-                _id: resourceId, // Preserve MongoDB ObjectId
+                ...nonComputedPropsExistingDoc,
+                ...nonComputedPropsRequestBody,
+                _id: documentId, // Preserve MongoDB ObjectId
                 _lastModified: new Date().toISOString(),
                 _createdAt
               };
 
-            await client.db(databaseName).collection(collectionName).replaceOne({ _id: resourceId }, updatedDocument);
+            await client.db(databaseName).collection(collectionName).replaceOne({ _id: documentId }, updatedDocument);
 
-            const newETag = crypto.createHash('sha256').update(JSON.stringify(nonComputedBody)).digest('base64');
+            const newETag = crypto.createHash('sha256').update(JSON.stringify(nonComputedPropsRequestBody)).digest('base64');
             const newLastModified = new Date(updatedDocument._lastModified).toISOString();
 
             res.setHeader('ETag', newETag);
@@ -191,10 +208,10 @@ app.put('/databases/:databaseName/collections/:collectionName', async (req, res)
         } else {
             // Create the resource if it doesn't exist
             const _createdAt = new Date().toISOString();
-            const nonComputedBody = removeComputedProperties(req.body);
-            const newResource = { ...nonComputedBody, _createdAt, _lastModified: null };
+            const nonComputedPropsRequestBody = removeComputedProperties(req.body);
+            const newDocument = { ...nonComputedPropsRequestBody, _createdAt, _id: documentId,  _lastModified: null };
 
-            const { insertedId } = await client.db(databaseName).collection(collectionName).insertOne(newResource);
+            const { insertedId } = await client.db(databaseName).collection(collectionName).insertOne(newDocument);
             const newETag = crypto.createHash('sha256').update(JSON.stringify(req.body)).digest('base64');            
 
             res.setHeader('ETag', newETag);
@@ -294,11 +311,66 @@ app.get('/databases/:databaseName/collections/:collectionName/:mongoId', async (
         console.error(`INTERNAL_ERROR (QueryService): Exception encountered during document lookup (${collectionName}/${mongoId}) See details -> ${ex.message}`);
         res.status(500).json({ 
             name: connectionName,
-            message: `Exception encountered during lookup (${collectionName}/${mongoId})`,
+            message: `INTERNAL_ERROR: Exception encountered during lookup (${collectionName}/${mongoId})`,
             timestamp: new Date().toISOString() 
         });
     }
 });
+
+app.delete('/databases/:databaseName/collections/:collectionName/:mongoId', async (req, res) => {
+    const { databaseName, collectionName, mongoId } = req.params;
+    const { client, connectionName } = CONNECTED_CLIENTS[databaseName];
+
+    // A stopgap prior to moving this logic to a middleware function. The 
+    // ObjectId constructor throws an exception rather than 
+    // returning an error below
+    try {
+        if (!ObjectId.isValid(new ObjectId(mongoId))) {
+           // do nothing proceed to the next try/catch block
+        }
+    } catch(ex) {
+        console.error(`INTERNAL_ERROR (QueryService): Exception encountered while inserting into collection (${databaseName}/${collectionName}) See details -> ${ex.message}`);
+
+        res.status(400).json({ 
+            name: connectionName,
+            message: `BAD_REQUEST: Missing or invalid id param. id *MUST* be a valid MongoDB ObjectId. See https://stackoverflow.com/questions/10593337/is-there-any-way-to-create-mongodb-like-id-strings-without-mongodb for example ObjectId`,
+            timestamp: new Date().toISOString() 
+        });
+        return;
+    }
+  
+    try {
+        if (!client) {
+            res.status(404).json({
+                name: connectionName,
+                message: `NOT_FOUND: No existing connection found for database: (${databaseName})`,
+                timestamp: new Date().toISOString(),
+            });
+            return;
+        }
+
+      const query = { _id: new ObjectId(mongoId) };
+      const result = await client.db(databaseName).collection(collectionName).deleteOne(query);
+  
+        if (result.deletedCount === 0) {
+            res.status(404).json({
+                name: connectionName,
+                message: `NOT_FOUND: Could not find document (${collectionName}/${mongoId})`,
+                timestamp: new Date().toISOString(),
+            });
+        } else {
+            res.status(204).send();
+        }
+    } catch (ex) {
+        console.error(`INTERNAL_ERROR (QueryService): Exception encountered during document delete (${collectionName}/${mongoId}) See details -> ${ex.message}`);
+        res.status(500).json({
+            name: connectionName,
+            message: `INTERNAL_ERROR: Exception encountered during document delete (${collectionName}/${mongoId})`,
+            timestamp: new Date().toISOString()
+        });
+    }
+  });
+  
 
 
 app.use((req, res) => {
